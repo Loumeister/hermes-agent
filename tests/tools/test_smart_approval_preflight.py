@@ -1,6 +1,8 @@
 """Security-boundary contracts for Smart Approval runtime preflight."""
 
 import json
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +20,56 @@ from tools.approval_preflight import (
     verify_preflight,
 )
 from tools.approval_smart import _smart_approve
+from hermes_cli._subprocess_compat import windows_hide_flags
+
+
+@pytest.mark.parametrize("command", [
+    "rm -f -- /tmp/$TARGET", "rm -f -- /tmp/missing && echo followup",
+    "rm -f -- /tmp/missing > /tmp/valuable", "rm -f -- ~/valuable",
+])
+def test_shell_expansion_or_followup_cannot_be_approved_as_missing(command, tmp_path):
+    preflight = observe_preflight(command, env_type="local", cwd=str(tmp_path))
+    assert preflight is None or deterministic_preflight_verdict(preflight) != "approve"
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_disposable_root_does_not_follow_parent_symlink_outside(tmp_path, monkeypatch):
+    disposable = tmp_path / "disposable"
+    disposable.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "valuable").write_text("keep")
+    (disposable / "escape").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(approval_context, "_get_approval_config", lambda: {
+        "disposable_roots": [str(disposable)],
+    })
+    preflight = observe_preflight("rm -f -- disposable/escape/valuable", env_type="local", cwd=str(tmp_path))
+    assert deterministic_preflight_verdict(preflight) == "escalate"
+
+
+def test_real_process_exit_invalidates_approval(tmp_path):
+    child = subprocess.Popen(
+        [sys._base_executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=windows_hide_flags(),
+    )
+    try:
+        command = f"taskkill /F /PID {child.pid}"
+        preflight = observe_preflight(command, env_type="local", cwd=str(tmp_path))
+        assert preflight.status == "ready"
+        assert preflight.identity["processes"][0]["exists"] is True
+        seal_preflight(preflight)
+        assert verify_preflight(preflight, command=command, env_type="local", cwd=str(tmp_path)).allowed
+        child.terminate()
+        child.wait(timeout=10)
+        check = verify_preflight(preflight, command=command, env_type="local", cwd=str(tmp_path))
+        assert not check.allowed and check.cause == "IDENTITY_MISMATCH"
+        missing_with_followup = observe_preflight(command + " && echo followup", env_type="local", cwd=str(tmp_path))
+        assert deterministic_preflight_verdict(missing_with_followup) != "approve"
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            child.wait(timeout=10)
 
 
 def test_machine_observations_are_untrusted_structured_data():

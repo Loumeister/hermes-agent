@@ -39,7 +39,7 @@ _FORCE_TASKKILL_RE = re.compile(r"(?i)\btaskkill(?:\.exe)?\b[^\n]*\s/F(?:\s|$)")
 _PORT_REFERENCE_RE = re.compile(r"(?<!\d):(\d{2,5})\b")
 _PORT_INSPECTION_RE = re.compile(r"(?i)\b(?:netstat(?:\.exe)?|get-nettcpconnection)\b")
 _SHELL_BOUNDARY_RE = re.compile(r"\s*(?:&&|\|\||[;|\n])\s*")
-_SHELL_META_RE = re.compile(r"[*?\[\]`]|\$\(")
+_SHELL_META_RE = re.compile(r"[*?\[\]`$~<>&#]")
 
 _telemetry_lock = threading.Lock()
 _telemetry_total = 0
@@ -91,7 +91,9 @@ def _first_shell_segment(command: str) -> str:
 
 
 def _bounded_rm_operands(command: str) -> Optional[list[str]]:
-    """Operands for a simple, non-recursive first-segment ``rm``; else None."""
+    """Operands for a literal, non-recursive standalone ``rm``; else None."""
+    if _SHELL_BOUNDARY_RE.search(command) or _SHELL_META_RE.search(command):
+        return None
     segment = _first_shell_segment(command)
     try:
         argv = shlex.split(segment, posix=True)
@@ -167,7 +169,7 @@ def _disposable_roots() -> list[str]:
     roots = []
     for value in raw:
         if isinstance(value, str) and value.strip():
-            roots.append(_normalized_path(os.path.expandvars(os.path.expanduser(value.strip()))))
+            roots.append(_normalized_path(os.path.realpath(os.path.expandvars(os.path.expanduser(value.strip())))))
     return roots
 
 
@@ -216,7 +218,10 @@ def _observe_files(command: str, cwd: str) -> ApprovalPreflight:
                 "size": int(info.st_size),
                 "mtime_ns": int(info.st_mtime_ns),
             }
-        observed["under_disposable_root"] = any(_under_root(lexical, root) for root in disposable_roots)
+        # rm unlinks the final component itself, but follows symlinked parents.
+        effective_path = _normalized_path(os.path.join(os.path.realpath(os.path.dirname(lexical)), os.path.basename(lexical)))
+        identity["effective_path"] = effective_path
+        observed["under_disposable_root"] = any(_under_root(effective_path, root) for root in disposable_roots)
         observed["git"] = _git_observation(lexical, cwd=cwd)
         identities.append(identity)
         observations.append(observed)
@@ -341,6 +346,7 @@ def _observe_processes(command: str, cwd: str) -> ApprovalPreflight:
         observations={
             "trust": "UNTRUSTED_MACHINE_OBSERVATION",
             "processes": observations,
+            "single_command": not bool(_SHELL_BOUNDARY_RE.search(command)),
             "command_target": _process_target_evidence(command, observations),
         },
         reason="" if complete else "stable process identity could not be observed",
@@ -396,7 +402,7 @@ def deterministic_preflight_verdict(preflight: ApprovalPreflight) -> Optional[st
             return "escalate"
     elif preflight.kind == "force_kill_pid":
         processes = preflight.observations.get("processes", [])
-        if processes and all(item.get("exists") is False for item in processes):
+        if processes and all(item.get("exists") is False for item in processes) and preflight.observations.get("single_command"):
             return "approve"
         target = preflight.observations.get("command_target", {})
         if not isinstance(target, dict) or target.get("identity_match") is not True:

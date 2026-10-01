@@ -1,0 +1,35 @@
+name: Runtime preflight validation
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/runtime-preflight-platforms]
+permissions:
+  contents: read
+jobs:
+  focused:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: ./.github/actions/setup-pm
+        id: pm
+        with:
+          test-environment: 'true'
+          extras: '[]'
+      - name: Native regression receipts
+        shell: bash
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          scripts/run_tests.sh tests/tools/test_smart_approval_preflight.py tests/agent/test_terminal_approval_batch.py tests/agent/test_auxiliary_client.py -k 'smart_approval_preflight or TestRuntimePreflightBypass or TestBuildCallKwargsMaxTokens' -j 3 -q --tb=short
+      - name: Relevant integration suite (Linux and macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          scripts/run_tests.sh tests/agent/test_terminal_approval_batch.py tests/agent/test_auxiliary_client.py tests/tools/test_smart_approval_preflight.py tests/tools/test_terminal_task_cwd.py tests/tools/test_approval.py tests/tools/test_terminal_tool.py tests/tools/test_model_tools.py -j 3 -q --tb=short

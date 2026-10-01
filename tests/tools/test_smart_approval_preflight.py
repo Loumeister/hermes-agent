@@ -26,6 +26,9 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 @pytest.mark.parametrize("command", [
     "rm -f -- /tmp/$TARGET", "rm -f -- /tmp/missing && echo followup",
     "rm -f -- /tmp/missing > /tmp/valuable", "rm -f -- ~/valuable",
+    "rm -f -- /tmp/%TARGET%", "rm -f -- /tmp/{first,second}",
+    r"rm -f -- C:\valuable", "./untrusted/rm -f -- /tmp/missing",
+    "./untrusted/taskkill /F /PID 2147483647", "python untrusted.py taskkill /F /PID 2147483647",
 ])
 def test_shell_expansion_or_followup_cannot_be_approved_as_missing(command, tmp_path):
     preflight = observe_preflight(command, env_type="local", cwd=str(tmp_path))
@@ -66,6 +69,8 @@ def test_real_process_exit_invalidates_approval(tmp_path):
         assert not check.allowed and check.cause == "IDENTITY_MISMATCH"
         missing_with_followup = observe_preflight(command + " && echo followup", env_type="local", cwd=str(tmp_path))
         assert deterministic_preflight_verdict(missing_with_followup) != "approve"
+        missing_with_redirect = observe_preflight(command + " > valuable", env_type="local", cwd=str(tmp_path))
+        assert missing_with_redirect is None or deterministic_preflight_verdict(missing_with_redirect) != "approve"
     finally:
         if child.poll() is None:
             child.terminate()

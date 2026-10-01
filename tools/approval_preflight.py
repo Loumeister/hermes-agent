@@ -34,12 +34,10 @@ logger = logging.getLogger("tools.approval")
 _EXECUTION_WINDOW_SECONDS = 5.0
 _STALE_RATE_WARNING_THRESHOLD = 0.03
 _MAX_RAW_VALUE_CHARS = 4096
-_TASKKILL_PID_ARG_RE = re.compile(r"(?i)/PID\s+(\d+)")
-_FORCE_TASKKILL_RE = re.compile(r"(?i)\btaskkill(?:\.exe)?\b[^\n]*\s/F(?:\s|$)")
 _PORT_REFERENCE_RE = re.compile(r"(?<!\d):(\d{2,5})\b")
 _PORT_INSPECTION_RE = re.compile(r"(?i)\b(?:netstat(?:\.exe)?|get-nettcpconnection)\b")
 _SHELL_BOUNDARY_RE = re.compile(r"\s*(?:&&|\|\||[;|\n])\s*")
-_SHELL_META_RE = re.compile(r"[*?\[\]`$~<>&#]")
+_SHELL_META_RE = re.compile(r"[*?\[\]`$%~<>&#{}\\]")
 
 _telemetry_lock = threading.Lock()
 _telemetry_total = 0
@@ -99,7 +97,7 @@ def _bounded_rm_operands(command: str) -> Optional[list[str]]:
         argv = shlex.split(segment, posix=True)
     except ValueError:
         return None
-    if not argv or Path(argv[0]).name.lower() not in {"rm", "rm.exe"}:
+    if not argv or argv[0].lower() not in {"rm", "rm.exe"}:
         return None
     operands: list[str] = []
     options_done = False
@@ -120,9 +118,26 @@ def _bounded_rm_operands(command: str) -> Optional[list[str]]:
 
 def _taskkill_pids(command: str) -> list[int]:
     segment = _first_shell_segment(command)
-    if not _FORCE_TASKKILL_RE.search(segment):
+    try:
+        argv = shlex.split(segment, posix=True)
+    except ValueError:
         return []
-    return [int(value) for value in _TASKKILL_PID_ARG_RE.findall(segment)]
+    if not argv or argv[0].lower() not in {"taskkill", "taskkill.exe"}:
+        return []
+    pids = []
+    force = False
+    index = 1
+    while index < len(argv):
+        option = argv[index].upper()
+        if option == "/F":
+            force = True
+        elif option == "/PID" and index + 1 < len(argv) and argv[index + 1].isdigit():
+            index += 1
+            pids.append(int(argv[index]))
+        else:
+            return []
+        index += 1
+    return pids if force else []
 
 
 def requires_runtime_preflight(command: str) -> bool:
@@ -346,7 +361,7 @@ def _observe_processes(command: str, cwd: str) -> ApprovalPreflight:
         observations={
             "trust": "UNTRUSTED_MACHINE_OBSERVATION",
             "processes": observations,
-            "single_command": not bool(_SHELL_BOUNDARY_RE.search(command)),
+            "single_command": not bool(_SHELL_BOUNDARY_RE.search(command) or _SHELL_META_RE.search(command)),
             "command_target": _process_target_evidence(command, observations),
         },
         reason="" if complete else "stable process identity could not be observed",
